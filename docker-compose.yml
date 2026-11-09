@@ -1,0 +1,35 @@
+# The converter container sits on an internal-only network: it can answer Caddy but has
+# NO internet access, so a hostile file can never make LibreOffice/ffmpeg fetch anything.
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=4g,mode=1777
+      - /home/converter:size=64m,uid=10001
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
+    mem_limit: 3g
+    cpus: 2
+    environment:
+      FILE_TTL_MS: "900000"
+      MAX_CONCURRENT: "2"
+      RATE_LIMIT_CONVERSIONS: "20"
+      TRUST_PROXY: "1"
+    networks: [internal]
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    networks: [internal, public]
+networks:
+  internal:
+    internal: true
+  public: {}
+volumes:
+  caddy_data: {}
