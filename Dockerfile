@@ -1,4 +1,4 @@
-# Same tool versions the test suite ran against (Ubuntu 24.04: ImageMagick 6.9.12, ffmpeg 6.1, LibreOffice 24.2, pandoc 3.1.3).
+# Same tool versions the tests ran against (Ubuntu 24.04: ImageMagick 6.9.12, ffmpeg 6.1, LibreOffice 24.2, pandoc 3.1.3).
 FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -11,13 +11,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
-COPY src ./src
-COPY public ./public
-COPY policy ./policy
-COPY scripts/heic2png.py ./scripts/heic2png.py
+# All project files sit at the repository root (no sub-folders).
+COPY *.js *.html *.css *.woff2 policy.xml heic2png.py ./
 RUN useradd --system --create-home --uid 10001 converter
 USER converter
 ENV NODE_ENV=production PORT=8080 WORK_DIR=/tmp/jobs TRUST_PROXY=1
 EXPOSE 8080
-HEALTHCHECK --interval=30s --timeout=5s CMD node -e "fetch('http://127.0.0.1:8080/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
-CMD ["node", "src/server.js"]
+CMD ["node", "server.js"]

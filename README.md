@@ -41,23 +41,21 @@ A free, no-account file-format converter with an Arabic (RTL) and English (LTR) 
 
 No database: jobs live in memory for 15 minutes and are not needed afterwards. No paid APIs are used.
 
-## 3. Structure
+## 3. Structure (flat: every file at the repository root)
 
 ```
-src/server.js      HTTP server, security headers, rate limits, upload, queue, download, auto-delete
-src/formats.js     the allow-list: categories, input/output formats, size limits
-src/detect.js      real format detection from file bytes
-src/convert.js     conversion engines (ImageMagick, ffmpeg, LibreOffice, poppler, pandoc, archives)
-policy/policy.xml  restrictive ImageMagick policy (deny all coders, allow a short list)
-scripts/heic2png.py  HEIC decoder (pillow-heif)
-scripts/build-fonts.mjs   copies Arabic+Latin font subsets into public/fonts
-scripts/build-preview.mjs builds a single-file static preview (preview/index.html)
-public/            index.html, styles.css, app.js, fonts.css, fonts/
-test/make-fixtures.sh  generates a sample file for every input format + hostile files
-test/run-tests.mjs     end-to-end API tests (conversion matrix + security)
-test/ui-test.cjs       browser tests with Playwright
-Dockerfile, docker-compose.yml, deploy/Caddyfile
+server.js       HTTP server, security headers, rate limits, upload, queue, download, auto-delete,
+                and an allow-list of the front-end files it serves
+formats.js      the allow-list: categories, input/output formats, size limits
+detect.js       real format detection from file bytes
+convert.js      conversion engines (ImageMagick, ffmpeg, LibreOffice, poppler, pandoc, archives)
+policy.xml      restrictive ImageMagick policy (deny all coders, allow a short list)
+heic2png.py     HEIC decoder (pillow-heif)
+index.html, styles.css, app.js, fonts.css, *.woff2   the website (fonts: SIL Open Font License)
+Dockerfile      production image (used by Railway)
 ```
+
+Only `index.html`, `styles.css`, `app.js`, `fonts.css` and `/fonts/*.woff2` are served to browsers; server code, `package.json` and `policy.xml` are never served.
 
 API: `GET /api/formats`, `POST /api/convert` (multipart: `file`, `target`), `GET /api/download/:id`, `DELETE /api/files/:id`, `GET /api/health`.
 
@@ -119,7 +117,7 @@ Notes:
 - **Allow-list only:** a conversion runs only if the (input, output) pair is in `src/formats.js`.
 - **Size limits** per category plus a global multer cap; archives are inspected before unpacking (zip-bomb guard, links/special files refused, `..`/absolute paths refused).
 - **Isolation:** each job gets a private random directory (mode 700); tools run via `execFile` (no shell) under `prlimit` (CPU time, max output size), `nice`, a wall-clock timeout with SIGKILL, and a scrubbed environment. ImageMagick runs with a deny-all policy and explicit coder prefixes; ffmpeg runs with an explicit demuxer and `protocol_whitelist file`; pandoc reads with `--sandbox`; LibreOffice never runs macros in headless convert mode and uses a throw-away profile.
-- In Docker: read-only root, tmpfs for jobs, non-root user, all capabilities dropped, `no-new-privileges`, pid/memory/CPU limits, and **no internet egress** for the converter container (internal network).
+- In Docker: runs as a non-root user. (Railway does not offer the read-only filesystem / no-egress network options of a self-managed Docker host.)
 - **Concurrency queue:** 2 conversions at a time, 20 waiting max (503 "busy" beyond that).
 - **Rate limits:** 20 conversions per IP per 10 minutes; 120 API calls per IP per minute (configurable).
 - **Auto-delete:** original deleted right after conversion; result deleted after 15 minutes or on "Delete now"; a sweeper removes leftovers every 30 s; the whole work dir is wiped on start/stop.
@@ -136,71 +134,24 @@ Requirements: Node 20+, ImageMagick 6, ffmpeg, LibreOffice, pandoc, poppler-util
 
 ```bash
 npm ci
-npm run build:fonts      # only needed if public/fonts is missing
 npm start                # http://localhost:8080
 ```
 
-Environment variables: `PORT` (8080), `FILE_TTL_MS` (900000), `MAX_CONCURRENT` (2), `MAX_QUEUE` (20), `RATE_LIMIT_CONVERSIONS` (20 per 10 min), `RATE_LIMIT_GENERAL` (120 per min), `TRUST_PROXY` (`loopback`; set `1` behind one reverse proxy), `WORK_DIR`, `CONVERT_TIMEOUT_MS` (300000). No secrets are needed.
+Environment variables: `PORT` (8080), `FILE_TTL_MS` (900000), `MAX_CONCURRENT` (2), `MAX_QUEUE` (20), `RATE_LIMIT_CONVERSIONS` (20 per 10 min), `RATE_LIMIT_GENERAL` (120 per min), `TRUST_PROXY` (`loopback`; `1` behind one proxy such as Railway), `WORK_DIR`, `CONVERT_TIMEOUT_MS` (300000). No secrets are needed.
 
-## 7. Tests
+## 7. Test results (2026-11-10, this flat layout)
 
-```bash
-./test/make-fixtures.sh          # needs python-pptx and pillow-heif for the fixtures
-npm test                         # API: conversion matrix + security
-PORT=18090 npm start & node test/ui-test.cjs   # browser (needs Playwright + Chromium)
-```
+- API suite: **242 / 242 passed** — 204 conversion pairs (each output downloaded and its real type verified) + 38 security/behaviour checks, including: fake/renamed files refused, SVG refused, zip bomb / symlink / path-traversal archives refused, no local files embedded by markdown conversions, unguessable download IDs, delete-now, CSP/HSTS/nosniff/no-referrer headers, rate limit (429), expiry after TTL, sweeper cleans disk, and server files (server.js, package.json, policy.xml, …) never served.
+- Browser suite (Chromium): **11 / 11 passed** — Arabic RTL default, upload → download, delete, drag-and-drop video → MP3, targets per file type, clear error for unsupported files, English LTR, nav links, no horizontal scroll at 390 px, no console errors.
+- Not tested here: the Docker image build (no Docker in the build environment), Safari/Firefox, load testing.
 
-### Results of the run on 2026-11-05 (Ubuntu 24.04 container, Node 22.23)
+## 8. Deployment on Railway
 
-- **API suite: 234 / 234 passed** — 204 conversion pairs (each output downloaded and its real type verified) + 30 security/behaviour checks:
-  - PASS  rejects executable renamed to .png  (HTTP 415)
-  - PASS  rejects SVG (not on allow-list)  (HTTP 415)
-  - PASS  rejects fake .docx  (HTTP 415)
-  - PASS  PDF renamed .png is detected as PDF (target png->pdf refused, pdf->pdf invalid)  (HTTP 400 unsupported_pair)
-  - PASS  rejects unknown target format  (HTTP 400)
-  - PASS  rejects cross-category target (png -> mp3)  (HTTP 400)
-  - PASS  rejects oversized/invalid 30 MB upload  (HTTP 415 unsupported_type)
-  - PASS  rejects zip containing a symlink  (HTTP 422 archive_unsafe)
-  - PASS  rejects zip bomb (600 MB uncompressed)  (HTTP 422 archive_unsafe)
-  - PASS  tar path traversal entry is refused  (HTTP 422 archive_unsafe)
-  - PASS  no file escaped the job folder
-  - PASS  markdown -> docx does not embed local files  (HTTP 200)
-  - PASS  markdown -> odt does not embed local files  (HTTP 200)
-  - PASS  markdown -> epub does not embed local files  (HTTP 200)
-  - PASS  markdown -> html does not embed local files  (HTTP 200)
-  - PASS  download rejects path traversal id  (HTTP 404)
-  - PASS  download rejects unknown id  (HTTP 404)
-  - PASS  delete endpoint removes the result immediately
-  - PASS  Content-Security-Policy set
-  - PASS  HSTS header set
-  - PASS  X-Content-Type-Options: nosniff
-  - PASS  Referrer-Policy: no-referrer
-  - PASS  X-Powered-By removed
-  - PASS  static asset /styles.css served
-  - PASS  static asset /app.js served
-  - PASS  unknown API route returns 404
-  - PASS  dotfile request handled safely
-  - PASS  rate limit: 4th conversion in window gets 429  (200,200,200,429,429)
-  - PASS  result expires after TTL  (HTTP 404)
-  - PASS  sweeper deleted expired job folders from disk  (0 left)
-- **Browser suite: 11 / 11 passed** — Arabic RTL default, server mode, file-picker upload → WebP download with correct name, Delete now, drag-and-drop MP4 → MP3, targets match file type, clear error for unsupported file, English LTR switch, nav links, no horizontal scroll at 390 px, no console errors.
-- **Static preview mode:** banner shown, PNG → JPG converted in the browser, MP3 shows the "needs the server" message, no JS errors.
+The repository is connected to a Railway service; every push to `main` rebuilds from `Dockerfile`. The service uses the health check `/api/health` and these variables: `PORT=8080`, `TRUST_PROXY=1`, `NODE_ENV=production`, `FILE_TTL_MS=900000`, `MAX_CONCURRENT=2`, `RATE_LIMIT_CONVERSIONS=20`, `WORK_DIR=/tmp/jobs`. Give the service at least 2 GB RAM for LibreOffice and video.
 
-Not tested: the Docker image build and docker-compose stack (Docker was not available in the build environment), real HTTPS/Caddy, load testing, Safari/Firefox (only Chromium was tested).
+## 9. Known limitations
 
-## 8. Deployment (needs your approval — nothing was deployed)
-
-1. Get a Linux VPS (2+ vCPU, 4 GB RAM, 40 GB disk) and a domain; point the domain's A record to the server. *(paid — your decision)*
-2. Install Docker and the compose plugin.
-3. Copy this project to the server, set your domain in `deploy/Caddyfile` (replace `example.com`).
-4. `docker compose up -d --build`
-5. Check: `https://your-domain/api/health` returns `{"ok":true}`, then convert a test file.
-6. Add a privacy policy/terms page if required where you operate.
-
-## 9. Known limitations / remaining tasks
-
-- Conversions are synchronous per request (fine for files up to 100 MB; very long videos may hit the 5-minute timeout).
-- One server instance: the job store and rate limits are in memory. For several instances, move them to Redis.
-- Markup → DOCX/ODT/EPUB drops images (security trade-off, see §4).
+- Conversions are synchronous per request (very long videos may hit the 5-minute timeout).
+- One instance: job store and rate limits are in memory.
+- Markup → DOCX/ODT/EPUB drops images on purpose (security).
 - No legal pages (privacy policy / terms) yet.
-- The static preview only demonstrates the interface and image conversion; downloads there are disabled by the preview host (save the image by right-click / long press).
